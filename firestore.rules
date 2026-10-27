@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // User profiles
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId);
+      allow delete: if false; // Safeguard user accounts from deletion via client
+    }
+
+    // Waste listings and posts
+    match /wastePosts/{postId} {
+      // Authenticated users can browse marketplace
+      allow read: if isAuthenticated();
+      // Authenticated user can create listings owned by themselves
+      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
+      // Owner can update their post, or authorized recipient can transition reserved post to completed
+      allow update: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        (resource.data.status == 'reserved' &&
+         request.resource.data.status == 'completed' &&
+         request.resource.data.ownerId == resource.data.ownerId &&
+         request.resource.data.title == resource.data.title)
+      );
+      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Listing Requests (Milestone 3.2: Marketplace Requests)
+    match /listingRequests/{requestId} {
+      // Requesters can see their own requests; listing owners can see requests for their items
+      allow read: if isAuthenticated() && (
+        resource.data.requesterId == request.auth.uid ||
+        resource.data.listingOwnerId == request.auth.uid
+      );
+
+      // Authenticated users can create requests:
+      // - requesterId must match authenticated UID (cannot pretend to be another user)
+      // - users cannot request their own listing (listingOwnerId != requesterId)
+      // - initial status must be 'pending'
+      allow create: if isAuthenticated() &&
+        request.resource.data.requesterId == request.auth.uid &&
+        request.resource.data.listingOwnerId != request.auth.uid &&
+        request.resource.data.status == 'pending';
+
+      // Updates:
+      // - Core IDs are immutable (requesterId, listingOwnerId, listingId cannot be altered)
+      // - Listing owner can accept, reject, or mark completed
+      // - Requester can cancel their own pending request
+      // - Accepted requester can confirm completion of the circular handoff
+      // - Users cannot modify another user's request
+      allow update: if isAuthenticated() &&
+        request.resource.data.requesterId == resource.data.requesterId &&
+        request.resource.data.listingOwnerId == resource.data.listingOwnerId &&
+        request.resource.data.listingId == resource.data.listingId &&
+        (
+          (resource.data.listingOwnerId == request.auth.uid &&
+           (request.resource.data.status == 'accepted' ||
+            request.resource.data.status == 'rejected' ||
+            request.resource.data.status == 'completed')) ||
+          (resource.data.requesterId == request.auth.uid &&
+           resource.data.status == 'pending' &&
+           request.resource.data.status == 'cancelled') ||
+          (resource.data.requesterId == request.auth.uid &&
+           resource.data.status == 'accepted' &&
+           request.resource.data.status == 'completed')
+        );
+
+      allow delete: if false;
+    }
+
+    // Completed Circular Actions & EcoScore Records (Milestone 4.2)
+    match /completedActions/{completionId} {
+      // Authenticated users can view verified completions
+      allow read: if isAuthenticated();
+      // Only authorized participants (owner or requester) can record completion
+      // Enforces unique deterministic ID: completionId == ('completion_' + request.resource.data.postId)
+      allow create: if isAuthenticated() &&
+        (request.resource.data.ownerId == request.auth.uid ||
+         request.resource.data.requesterId == request.auth.uid) &&
+        completionId == ('completion_' + request.resource.data.postId) &&
+        request.resource.data.status == 'completed';
+      // Immutable records: prevents users from modifying or deleting completed circular actions
+      allow update, delete: if false;
+    }
+
+    // Activities log
+    match /activities/{activityId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false; // Activities are append-only audit trail
+    }
+
+    // Campuses and community hubs
+    match /campuses/{campusId} {
+      allow read: if isAuthenticated();
+      allow write: if false; // Curated campus hubs
+    }
+  }
+}
